@@ -1,7 +1,7 @@
 import io
 import json
+import os
 import torch
-import timm
 from torchvision import transforms
 from PIL import Image
 from datetime import datetime
@@ -18,30 +18,42 @@ import schemas
 # Automatically create database tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Pixel and Paws Backend API", version="2.5.0")
+app = FastAPI(title="Pixel and Paws Backend API", version="2.6.0")
 
 # Initialize Gemini 2.0 Flash Client (Reads GEMINI_API_KEY from environment)
 ai_client = genai.Client()
 
 # ------------------------------------------------------------------
-# MODEL INITIALIZATION: MegaDescriptor-L-384 (PyTorch via timm)
+# LAZY-LOAD MODEL INITIALIZATION (Prevents Cloud Run Startup Timeout)
 # ------------------------------------------------------------------
-print("Loading MegaDescriptor-L-384 weights from Hugging Face...")
-embedding_model = timm.create_model("hf-hub:BVRA/MegaDescriptor-L-384", pretrained=True).eval()
+_embedding_model = None
+_transform = None
 
-transform = transforms.Compose([
-    transforms.Resize((384, 384)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
-print("MegaDescriptor-L-384 loaded successfully!")
+def get_embedding_model():
+    """
+    Lazy loads the MegaDescriptor-L-384 model on the first incoming request
+    rather than on server startup, ensuring Uvicorn binds to port 8080 instantly.
+    """
+    global _embedding_model, _transform
+    if _embedding_model is None:
+        print("Loading MegaDescriptor-L-384 weights from Hugging Face...")
+        import timm
+        _embedding_model = timm.create_model("hf-hub:BVRA/MegaDescriptor-L-384", pretrained=True).eval()
+        _transform = transforms.Compose([
+            transforms.Resize((384, 384)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        print("MegaDescriptor-L-384 loaded successfully!")
+    return _embedding_model, _transform
 
 
 def generate_backend_embedding(image_bytes: bytes) -> List[float]:
+    model, transform_pipeline = get_embedding_model()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor_img = transform(image).unsqueeze(0)
+    tensor_img = transform_pipeline(image).unsqueeze(0)
     with torch.no_grad():
-        features = embedding_model(tensor_img)
+        features = model(tensor_img)
     return features.squeeze(0).tolist()
 
 
@@ -55,14 +67,14 @@ def root():
 # ------------------------------------------------------------------
 @app.post("/api/v1/animals/upload", response_model=schemas.AnimalResponse)
 async def upload_animal_and_evaluate(
-        name: Optional[str] = Form("Unknown"),
-        species: str = Form(...),
-        description: Optional[str] = Form(""),
-        file: UploadFile = File(...),
-        db: Session = Depends(get_db)
+    name: Optional[str] = Form("Unknown"),
+    species: str = Form(...),
+    description: Optional[str] = Form(""),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     image_bytes = await file.read()
-
+    
     # 1. Generate 384-dim visual embedding using MegaDescriptor
     vector_embedding = generate_backend_embedding(image_bytes)
 
@@ -93,14 +105,14 @@ async def upload_animal_and_evaluate(
         )
         clean_json_text = response.text.replace("```json", "").replace("```", "").strip()
         triage_data = json.loads(clean_json_text)
-
+        
         severity_level = triage_data.get("severity_level", "MEDIUM")
         severity_score = int(triage_data.get("severity_score", 5))
         triage_notes = triage_data.get("triage_notes", "")
     except Exception as e:
         print(f"Gemini Triage Error: {e}")
 
-    # 3. Save to database
+    # 3. Save to Cloud SQL PostgreSQL database
     db_animal = models.AnimalProfile(
         name=name,
         species=species,
@@ -123,13 +135,13 @@ async def upload_animal_and_evaluate(
 # ------------------------------------------------------------------
 @app.post("/api/v1/lost-pets/report-upload")
 async def report_lost_pet_upload(
-        pet_name: str = Form(...),
-        owner_contact: str = Form(...),
-        file: UploadFile = File(...),
-        db: Session = Depends(get_db)
+    pet_name: str = Form(...),
+    owner_contact: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     image_bytes = await file.read()
-
+    
     # Generate embedding for lost pet photo
     embedding_vector = generate_backend_embedding(image_bytes)
 
@@ -152,9 +164,9 @@ async def report_lost_pet_upload(
 
     matches = [
         {
-            "id": s.id,
-            "name": s.name,
-            "species": s.species,
+            "id": s.id, 
+            "name": s.name, 
+            "species": s.species, 
             "severity_level": s.severity_level
         }
         for s in similar_strays
@@ -172,30 +184,30 @@ async def report_lost_pet_upload(
 # ------------------------------------------------------------------
 @app.get("/api/v1/dashboard/cases", response_model=List[schemas.AnimalResponse])
 def get_dashboard_cases(
-        status_filter: Optional[str] = None,
-        db: Session = Depends(get_db)
+    status_filter: Optional[str] = None, 
+    db: Session = Depends(get_db)
 ):
     query = db.query(models.AnimalProfile)
     if status_filter:
         query = query.filter(models.AnimalProfile.status == status_filter)
-
+    
     # Sort critical, high-score cases to the top of the dashboard
     return query.order_by(models.AnimalProfile.severity_score.desc()).all()
 
 
 @app.post("/api/v1/animals/{animal_id}/claim", response_model=schemas.AnimalResponse)
 def claim_rescue_case(
-        animal_id: int,
-        payload: schemas.ClaimCaseRequest,
-        db: Session = Depends(get_db)
+    animal_id: int, 
+    payload: schemas.ClaimCaseRequest, 
+    db: Session = Depends(get_db)
 ):
     animal = db.query(models.AnimalProfile).filter(models.AnimalProfile.id == animal_id).first()
     if not animal:
         raise HTTPException(status_code=404, detail="Animal report not found")
-
+    
     if animal.status == "CLAIMED":
         raise HTTPException(
-            status_code=400,
+            status_code=400, 
             detail=f"Case already claimed by volunteer {animal.claimed_by_volunteer_name}"
         )
 
@@ -246,3 +258,12 @@ def chat_with_assistant(payload: schemas.GeminiPromptRequest):
         return {"response": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------
+# SERVER ENTRY POINT: Binds to $PORT for Cloud Run compatibility
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

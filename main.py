@@ -100,7 +100,7 @@ async def upload_animal_and_evaluate(
 
     try:
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=[image_part, prompt],
         )
         clean_json_text = response.text.replace("```json", "").replace("```", "").strip()
@@ -252,7 +252,7 @@ def get_nearest_clinics(payload: schemas.NearestClinicRequest, db: Session = Dep
 def chat_with_assistant(payload: schemas.GeminiPromptRequest):
     try:
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=payload.prompt,
         )
         return {"response": response.text}

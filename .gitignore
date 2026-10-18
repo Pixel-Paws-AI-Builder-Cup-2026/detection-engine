@@ -1,0 +1,48 @@
+# === Virtual Environments ===
+/venv/
+.venv/
+env/
+ENV/
+bin/
+lib/
+include/
+share/
+
+# === Environment Keys & Credentials (CRITICAL) ===
+.env
+*.env
+.secrets
+credentials.json
+client_secret*.json
+
+# === Local Database State ===
+*.db
+*.sqlite3
+postgres-data/
+
+# === Python Cache & Operational Files ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# === Large ML Models & Hugging Face Cache ===
+.cache/
+.huggingface/
+huggingface_hub/
+models/
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# === IDE Configurations ===
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thmubs.db

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from google import genai
 from google.genai import types
-
+from contextlib import asynccontextmanager
 from database import get_db, engine, Base
 import models
 import schemas
@@ -18,42 +18,48 @@ import schemas
 # Automatically create database tables if they don't exist
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Pixel and Paws Backend API", version="2.6.0")
-
-# Initialize Gemini 2.0 Flash Client (Reads GEMINI_API_KEY from environment)
-ai_client = genai.Client()
-
+# ------------------------------------------------------------------
+# MODEL STATE CONTAINER (Loaded during startup)
+# ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # LAZY-LOAD MODEL INITIALIZATION (Prevents Cloud Run Startup Timeout)
 # ------------------------------------------------------------------
-_embedding_model = None
-_transform = None
+ml_resources = {}
 
-def get_embedding_model():
-    """
-    Lazy loads the MegaDescriptor-L-384 model on the first incoming request
-    rather than on server startup, ensuring Uvicorn binds to port 8080 instantly.
-    """
-    global _embedding_model, _transform
-    if _embedding_model is None:
-        print("Loading MegaDescriptor-L-384 weights from Hugging Face...")
-        import timm
-        _embedding_model = timm.create_model("hf-hub:BVRA/MegaDescriptor-L-384", pretrained=True).eval()
-        _transform = transforms.Compose([
-            transforms.Resize((384, 384)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        print("MegaDescriptor-L-384 loaded successfully!")
-    return _embedding_model, _transform
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- LOAD MODEL ON STARTUP ---
+    print("🚀 Loading MegaDescriptor-L-384 weights from Hugging Face into memory...")
+    import timm
+    ml_resources["model"] = timm.create_model("hf-hub:BVRA/MegaDescriptor-L-384", pretrained=True).eval()
+    ml_resources["transform"] = transforms.Compose([
+        transforms.Resize((384, 384)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    print("✨ MegaDescriptor-L-384 loaded successfully and ready!")
+    
+    yield
+    
+    # --- CLEANUP ON SHUTDOWN ---
+    ml_resources.clear()
 
+app = FastAPI(title="Pixel and Paws Backend API", version="2.6.0", lifespan=lifespan)
+
+# Initialize Gemini 3.8 Flash Client (Reads GEMINI_API_KEY from environment)
+ai_client = genai.Client()
 
 def generate_backend_embedding(image_bytes: bytes) -> List[float]:
-    model, transform_pipeline = get_embedding_model()
+    # Pull pre-loaded model & transform directly from memory state
+    print("✨ Pulling the model and transformation pipeline from memory")
+    model = ml_resources["model"]
+    transform_pipeline = ml_resources["transform"]
+    
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor_img = transform_pipeline(image).unsqueeze(0)
     with torch.no_grad():
         features = model(tensor_img)
+    print("✨ Backend embedding generated")
     return features.squeeze(0).tolist()
 
 
@@ -109,6 +115,13 @@ async def upload_animal_and_evaluate(
         severity_level = triage_data.get("severity_level", "MEDIUM")
         severity_score = int(triage_data.get("severity_score", 5))
         triage_notes = triage_data.get("triage_notes", "")
+
+        print("\n--- [GEMINI TRIAGE EVALUATION REPORT] ---")
+        print(f"🐾 Patient Name: {name}")
+        print(f"🚨 Severity Level: {severity_level}")
+        print(f"📊 Severity Score: {severity_score}/10")
+        print(f"📝 Triage Notes: {triage_notes}")
+        print("-------------------------------------------\n")
     except Exception as e:
         print(f"Gemini Triage Error: {e}")
 

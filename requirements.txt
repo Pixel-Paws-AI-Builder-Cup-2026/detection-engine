@@ -1,6 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 pydantic==2.6.4
 google-genai>=1.0.0
+numpy==1.26.4
 
 
 # Web Framework & Server
@@ -16,7 +17,7 @@ pgvector==0.2.5
 # Machine Learning & Embeddings
 torch==2.2.0
 torchvision==0.17.0
-timm==0.9.16
+timm==1.0.30
 huggingface_hub==2.2.0
 
 # Image Processing & Utilities

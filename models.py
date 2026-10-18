@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Float, DateTime, func
+from sqlalchemy import Column, Integer, String, Text, Float, DateTime, func, LargeBinary
 from pgvector.sqlalchemy import Vector
 from database import Base
 
@@ -9,10 +9,11 @@ class AnimalProfile(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=True, default="Unknown")
     species = Column(String(50), nullable=False)
-    description = Column(Text, nullable=True)
 
     # AI Embeddings & Severity Analysis
-    embedding = Column(Vector(384))  # MegaDescriptor 384-dim vector
+    embedding = Column(Vector(1536))  # MegaDescriptor 1536-dim vector
+    created_at = Column(DateTime, server_default=func.now())
+    description = Column(Text, nullable=True)
     severity_level = Column(String(20), default="UNKNOWN")  # CRITICAL, MEDIUM, LOW
     severity_score = Column(Integer, default=0)  # 1 to 10 scale
     triage_notes = Column(Text, nullable=True)  # Gemini AI summary
@@ -21,8 +22,11 @@ class AnimalProfile(Base):
     status = Column(String(50), default="REPORTED")  # REPORTED, CLAIMED, RESCUED
     claimed_by_volunteer_name = Column(String(100), nullable=True)
     claimed_at = Column(DateTime, nullable=True)
+    image_data = Column(LargeBinary, nullable=True)
 
-    created_at = Column(DateTime, server_default=func.now())
+    #location data for the volunteers to track
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
 
 
 class LostPet(Base):
@@ -30,9 +34,11 @@ class LostPet(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     pet_name = Column(String(100), nullable=False)
+    owner_name = Column(String(100), nullable=False)
     owner_contact = Column(String(100), nullable=False)
-    embedding = Column(Vector(384))
+    embedding = Column(Vector(1536))
     status = Column(String(50), default="LOST")
+    image_data = Column(LargeBinary, nullable=True)
     reported_at = Column(DateTime, server_default=func.now())
 
 

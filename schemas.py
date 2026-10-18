@@ -50,3 +50,14 @@ class NearestClinicRequest(BaseModel):
 
 class GeminiPromptRequest(BaseModel):
     prompt: str
+
+class LostPetResponse(BaseModel):
+    id: int
+    pet_name: Optional[str] = None
+    owner_name: str
+    owner_contact: str
+    status: str
+    reported_at: datetime
+
+    class Config:
+        from_attributes = True

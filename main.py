@@ -5,7 +5,7 @@ import torch
 from torchvision import transforms
 from PIL import Image
 from datetime import datetime
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from google import genai
@@ -49,7 +49,7 @@ app = FastAPI(title="Pixel and Paws Backend API", version="2.6.0", lifespan=life
 # Initialize Gemini 3.8 Flash Client (Reads GEMINI_API_KEY from environment)
 ai_client = genai.Client()
 
-def generate_backend_embedding(image_bytes: bytes) -> List[float]:
+def generate_backend_embedding(image_bytes: bytes):
     # Pull pre-loaded model & transform directly from memory state
     print("✨ Pulling the model and transformation pipeline from memory")
     model = ml_resources["model"]
@@ -60,7 +60,7 @@ def generate_backend_embedding(image_bytes: bytes) -> List[float]:
     with torch.no_grad():
         features = model(tensor_img)
     print("✨ Backend embedding generated")
-    return features.squeeze(0).tolist()
+    return features.squeeze(0).cpu().tolist()
 
 
 @app.get("/")
@@ -76,12 +76,14 @@ async def upload_animal_and_evaluate(
     name: Optional[str] = Form("Unknown"),
     species: str = Form(...),
     description: Optional[str] = Form(""),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
     image_bytes = await file.read()
     
-    # 1. Generate 384-dim visual embedding using MegaDescriptor
+    # 1. Generate 1536-dim visual embedding using MegaDescriptor
     vector_embedding = generate_backend_embedding(image_bytes)
 
     # 2. Analyze severity & triage using Gemini 2.0 Flash
@@ -129,12 +131,15 @@ async def upload_animal_and_evaluate(
     db_animal = models.AnimalProfile(
         name=name,
         species=species,
-        description=description,
         embedding=vector_embedding,
+        description=description,
         severity_level=severity_level,
         severity_score=severity_score,
         triage_notes=triage_notes,
-        status="REPORTED"
+        status="REPORTED",
+        image_data=image_bytes,
+        latitude=latitude,
+        longitude=longitude
     )
     db.add(db_animal)
     db.commit()
@@ -148,49 +153,88 @@ async def upload_animal_and_evaluate(
 # ------------------------------------------------------------------
 @app.post("/api/v1/lost-pets/report-upload")
 async def report_lost_pet_upload(
-    pet_name: str = Form(...),
+    pet_name: Optional[str] = Form("Unknown"),
+    owner_name: str = Form(...),
     owner_contact: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
+    # 1. Read image bytes and generate 1536-dim embedding
     image_bytes = await file.read()
-    
-    # Generate embedding for lost pet photo
     embedding_vector = generate_backend_embedding(image_bytes)
 
+    # 2. Save lost pet report to database
     db_pet = models.LostPet(
         pet_name=pet_name,
+        owner_name=owner_name,
         owner_contact=owner_contact,
-        embedding=embedding_vector
+        embedding=embedding_vector,
+        status="LOST",
+        image_data=image_bytes
     )
     db.add(db_pet)
     db.commit()
     db.refresh(db_pet)
 
-    # Match against animal profiles using pgvector cosine distance (<->)
-    similar_strays = (
-        db.query(models.AnimalProfile)
-        .order_by(models.AnimalProfile.embedding.cosine_distance(embedding_vector))
-        .limit(3)
+    # 3. Cross-match against stray/found animal profiles using pgvector cosine distance
+    # This checks if civilians have already uploaded a matching animal in the rescue cases!
+    potential_matches = db.query(models.AnimalProfile)\
+        .filter(models.AnimalProfile.embedding.cosine_distance(embedding_vector) < 0.4)\
+        .order_by(models.AnimalProfile.embedding.cosine_distance(embedding_vector))\
+        .limit(3)\
         .all()
-    )
 
-    matches = [
-        {
-            "id": s.id, 
-            "name": s.name, 
-            "species": s.species, 
-            "severity_level": s.severity_level
-        }
-        for s in similar_strays
-    ]
-
+    # 4. Return the newly created lost pet info along with any potential found matches
     return {
-        "message": "Lost pet reported and matched successfully",
+        "message": "Lost pet reported successfully!",
         "lost_pet_id": db_pet.id,
-        "potential_matches": matches
+        "potential_rescue_matches": [
+            {
+                "animal_id": match.id,
+                "species": match.species,
+                "description": match.description,
+                "severity_level": match.severity_level,
+                "latitude": match.latitude,
+                "longitude": match.longitude,
+                "last_reported_at": match.created_at.replace(microsecond=0)
+            }
+            for match in potential_matches
+        ]
     }
 
+    # ------------------------------------------------------------------
+# LOST PETS: GET ENDPOINTS
+# ------------------------------------------------------------------
+@app.get("/api/v1/lost-pets/", response_model=List[schemas.LostPetResponse])
+def get_all_lost_pets(
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.LostPet)
+    if status_filter:
+        query = query.filter(models.LostPet.status == status_filter)
+    
+    # Return newest lost pet reports first
+    return query.order_by(models.LostPet.reported_at.desc()).all()
+
+
+@app.get("/api/v1/lost-pets/{pet_id}", response_model=schemas.LostPetResponse)
+def get_lost_pet_by_id(
+    pet_id: int,
+    db: Session = Depends(get_db)
+):
+    pet = db.query(models.LostPet).filter(models.LostPet.id == pet_id).first()
+    if not pet:
+        raise HTTPException(status_code=404, detail="Lost pet report not found")
+    return pet
+
+@app.get("/api/v1/lost-pets/{pet_id}/image")
+def get_lost_pet_image(pet_id: int, db: Session = Depends(get_db)):
+    pet = db.query(models.LostPet).filter(models.LostPet.id == pet_id).first()
+    if not pet or not pet.image_data:
+        raise HTTPException(status_code=404, detail="Lost pet image not found")
+    
+    return Response(content=pet.image_data, media_type="image/jpeg")
 
 # ------------------------------------------------------------------
 # 3. DASHBOARD & VOLUNTEER RESCUE CLAIM WORKFLOW
@@ -272,6 +316,14 @@ def chat_with_assistant(payload: schemas.GeminiPromptRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/animals/{animal_id}/image")
+def get_animal_image(animal_id: int, db: Session = Depends(get_db)):
+    animal = db.query(models.AnimalProfile).filter(models.AnimalProfile.id == animal_id).first()
+    if not animal or not animal.image_data:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    # Return raw bytes with JPEG media type so the browser/frontend renders it instantly
+    return Response(content=animal.image_data, media_type="image/jpeg")
 
 # ------------------------------------------------------------------
 # SERVER ENTRY POINT: Binds to $PORT for Cloud Run compatibility
